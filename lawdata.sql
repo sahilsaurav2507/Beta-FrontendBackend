@@ -2,11 +2,19 @@
 -- LawVriksh Referral Platform Database Schema
 -- MySQL 8.0.39 Compatible
 --
--- Author:      Your Name
--- Version:     1.3
--- Last Update: 2025-07-20
--- Description: Final fix for 'Commands out of sync' error
---              by removing all non-breaking space characters.
+-- Author:      LawVriksh Team
+-- Version:     2.0
+-- Last Update: 2025-07-22
+-- Description: Complete database schema including ranking system,
+--              feedback system, and user management.
+--
+-- FEATURES INCLUDED:
+-- 1. User Management with Admin Support
+-- 2. Dynamic Ranking System (default_rank + current_rank)
+-- 3. Social Media Sharing with Points System
+-- 4. Comprehensive Feedback Survey System
+-- 5. Analytics Views and Stored Procedures
+-- 6. Automated Triggers for Rank Updates
 -- =====================================================
 
 -- -----------------------------------------------------
@@ -16,6 +24,7 @@ CREATE DATABASE IF NOT EXISTS lawvriksh_referral;
 USE lawvriksh_referral;
 
 -- For development, it's safe to drop tables for a clean slate.
+DROP TABLE IF EXISTS feedback;
 DROP TABLE IF EXISTS share_events;
 DROP TABLE IF EXISTS users;
 
@@ -37,12 +46,16 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     total_points INT NOT NULL DEFAULT 0,
     shares_count INT NOT NULL DEFAULT 0,
+    default_rank INT NULL,
+    current_rank INT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_users_email (email),
     INDEX idx_users_total_points (total_points DESC),
+    INDEX idx_users_current_rank (current_rank),
+    INDEX idx_users_default_rank (default_rank),
     INDEX idx_users_is_admin (is_admin)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -59,6 +72,50 @@ CREATE TABLE share_events (
     INDEX idx_share_events_user_id (user_id),
     INDEX idx_share_events_platform (platform),
     INDEX idx_share_events_user_platform (user_id, platform)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- =====================================================
+-- TABLE: feedback
+-- =====================================================
+CREATE TABLE feedback (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+
+    -- User identification (optional - can be anonymous)
+    user_id INT NULL,
+    ip_address VARCHAR(45) NULL,
+    user_agent TEXT NULL,
+
+    -- Contact information
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+
+    -- Multiple choice responses
+    biggest_hurdle ENUM('A', 'B', 'C', 'D', 'E') NOT NULL,
+    biggest_hurdle_other TEXT NULL,
+    primary_motivation ENUM('A', 'B', 'C', 'D') NULL,
+    time_consuming_part ENUM('A', 'B', 'C', 'D') NULL,
+    professional_fear ENUM('A', 'B', 'C', 'D') NOT NULL,
+
+    -- Short answer responses (2-4 sentences each)
+    monetization_considerations TEXT NULL,
+    professional_legacy TEXT NULL,
+    platform_impact TEXT NOT NULL,
+
+    -- Metadata
+    submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- Indexes for performance
+    INDEX idx_feedback_user_id (user_id),
+    INDEX idx_feedback_email (email),
+    INDEX idx_feedback_submitted_at (submitted_at),
+    INDEX idx_feedback_biggest_hurdle (biggest_hurdle),
+    INDEX idx_feedback_primary_motivation (primary_motivation),
+    INDEX idx_feedback_professional_fear (professional_fear),
+    INDEX idx_feedback_time_consuming_part (time_consuming_part),
+
+    -- Foreign key constraint (optional, allows anonymous feedback)
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =====================================================
@@ -84,6 +141,9 @@ BEGIN
     SET total_points = total_points + p_points_to_add,
         shares_count = shares_count + 1
     WHERE id = p_user_id;
+
+    -- Update current rank after points change
+    CALL sp_UpdateUserRanks();
 END//
 
 DROP PROCEDURE IF EXISTS sp_GetUserRank//
@@ -115,11 +175,74 @@ BEGIN
         u.email,
         u.total_points,
         u.shares_count,
-        ROW_NUMBER() OVER (ORDER BY u.total_points DESC) as user_rank
+        u.current_rank as user_rank
     FROM users u
     WHERE u.is_admin = FALSE
-    ORDER BY u.total_points DESC
+    ORDER BY u.total_points DESC, u.created_at ASC
     LIMIT p_limit OFFSET v_offset;
+END//
+
+DROP PROCEDURE IF EXISTS sp_UpdateUserRanks//
+CREATE PROCEDURE sp_UpdateUserRanks()
+BEGIN
+    -- Update current ranks based on points (excluding admins)
+    SET @rank = 0;
+    UPDATE users u1
+    JOIN (
+        SELECT id, (@rank := @rank + 1) as new_rank
+        FROM users
+        WHERE is_admin = FALSE
+        ORDER BY total_points DESC, created_at ASC
+    ) u2 ON u1.id = u2.id
+    SET u1.current_rank = u2.new_rank;
+END//
+
+DROP PROCEDURE IF EXISTS sp_AssignDefaultRank//
+CREATE PROCEDURE sp_AssignDefaultRank(IN p_user_id INT)
+BEGIN
+    DECLARE v_max_rank INT DEFAULT 0;
+
+    -- Get the highest default rank among non-admin users
+    SELECT COALESCE(MAX(default_rank), 0) INTO v_max_rank
+    FROM users
+    WHERE is_admin = FALSE;
+
+    -- Assign the next rank
+    UPDATE users
+    SET default_rank = v_max_rank + 1,
+        current_rank = v_max_rank + 1
+    WHERE id = p_user_id AND is_admin = FALSE;
+END//
+
+DROP PROCEDURE IF EXISTS sp_GetAroundMe//
+CREATE PROCEDURE sp_GetAroundMe(IN p_user_id INT, IN p_range INT)
+BEGIN
+    DECLARE v_user_rank INT DEFAULT 0;
+    DECLARE v_start_rank INT DEFAULT 1;
+    DECLARE v_end_rank INT DEFAULT 10;
+
+    -- Get user's current rank
+    SELECT current_rank INTO v_user_rank
+    FROM users
+    WHERE id = p_user_id AND is_admin = FALSE;
+
+    -- Calculate range
+    IF v_user_rank IS NOT NULL THEN
+        SET v_start_rank = GREATEST(1, v_user_rank - p_range);
+        SET v_end_rank = v_user_rank + p_range;
+    END IF;
+
+    -- Return users in range
+    SELECT
+        u.id,
+        u.name,
+        u.total_points,
+        u.current_rank as user_rank,
+        CASE WHEN u.id = p_user_id THEN TRUE ELSE FALSE END as is_current_user
+    FROM users u
+    WHERE u.is_admin = FALSE
+        AND u.current_rank BETWEEN v_start_rank AND v_end_rank
+    ORDER BY u.current_rank ASC;
 END//
 
 DELIMITER ;
@@ -137,6 +260,60 @@ BEGIN
     CALL sp_UpdateUserStats(NEW.user_id, NEW.points_earned);
 END//
 
+DROP TRIGGER IF EXISTS trg_after_user_insert//
+CREATE TRIGGER trg_after_user_insert
+AFTER INSERT ON users
+FOR EACH ROW
+BEGIN
+    -- Assign default rank for non-admin users
+    IF NEW.is_admin = FALSE THEN
+        CALL sp_AssignDefaultRank(NEW.id);
+    END IF;
+END//
+
+-- Feedback related procedures
+DROP PROCEDURE IF EXISTS sp_GetFeedbackStats//
+CREATE PROCEDURE sp_GetFeedbackStats()
+BEGIN
+    SELECT
+        COUNT(*) as total_responses,
+
+        -- Biggest hurdle breakdown
+        SUM(CASE WHEN biggest_hurdle = 'A' THEN 1 ELSE 0 END) as hurdle_time_commitment,
+        SUM(CASE WHEN biggest_hurdle = 'B' THEN 1 ELSE 0 END) as hurdle_simplifying,
+        SUM(CASE WHEN biggest_hurdle = 'C' THEN 1 ELSE 0 END) as hurdle_audience_reach,
+        SUM(CASE WHEN biggest_hurdle = 'D' THEN 1 ELSE 0 END) as hurdle_ethics,
+        SUM(CASE WHEN biggest_hurdle = 'E' THEN 1 ELSE 0 END) as hurdle_other,
+
+        -- Primary motivation breakdown
+        SUM(CASE WHEN primary_motivation = 'A' THEN 1 ELSE 0 END) as motivation_brand,
+        SUM(CASE WHEN primary_motivation = 'B' THEN 1 ELSE 0 END) as motivation_clients,
+        SUM(CASE WHEN primary_motivation = 'C' THEN 1 ELSE 0 END) as motivation_revenue,
+        SUM(CASE WHEN primary_motivation = 'D' THEN 1 ELSE 0 END) as motivation_education,
+
+        -- Time consuming part breakdown
+        SUM(CASE WHEN time_consuming_part = 'A' THEN 1 ELSE 0 END) as time_research,
+        SUM(CASE WHEN time_consuming_part = 'B' THEN 1 ELSE 0 END) as time_drafting,
+        SUM(CASE WHEN time_consuming_part = 'C' THEN 1 ELSE 0 END) as time_editing,
+        SUM(CASE WHEN time_consuming_part = 'D' THEN 1 ELSE 0 END) as time_formatting,
+
+        -- Professional fear breakdown
+        SUM(CASE WHEN professional_fear = 'A' THEN 1 ELSE 0 END) as fear_losing_clients,
+        SUM(CASE WHEN professional_fear = 'B' THEN 1 ELSE 0 END) as fear_irrelevant,
+        SUM(CASE WHEN professional_fear = 'C' THEN 1 ELSE 0 END) as fear_outdated,
+        SUM(CASE WHEN professional_fear = 'D' THEN 1 ELSE 0 END) as fear_none,
+
+        -- Recent activity
+        SUM(CASE WHEN submitted_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) as responses_last_7_days,
+        SUM(CASE WHEN submitted_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) as responses_last_30_days,
+
+        -- Date range
+        MIN(submitted_at) as first_response,
+        MAX(submitted_at) as latest_response
+
+    FROM feedback;
+END//
+
 DELIMITER ;
 
 -- These inserts will now fire the trigger correctly.
@@ -145,6 +322,29 @@ INSERT INTO share_events (user_id, platform, points_earned) VALUES
 (2, 'instagram', 2), (2, 'twitter', 1),
 (4, 'facebook', 3), (4, 'linkedin', 5), (4, 'instagram', 2), (4, 'twitter', 1),
 (5, 'facebook', 3), (5, 'linkedin', 5);
+
+-- =====================================================
+-- SAMPLE FEEDBACK DATA (Optional - for testing)
+-- =====================================================
+INSERT INTO feedback (
+    email, name, biggest_hurdle, primary_motivation, time_consuming_part, professional_fear,
+    monetization_considerations, professional_legacy, platform_impact,
+    ip_address
+) VALUES
+(
+    'john@example.com', 'John Doe', 'A', 'B', 'A', 'A',
+    'The main consideration is ensuring compliance with bar association rules while maintaining professional integrity. Time constraints also make it difficult to explore monetization opportunities.',
+    'I want to be remembered as someone who made legal knowledge more accessible to the general public. Sharing knowledge helps build a lasting impact beyond individual cases.',
+    'An effortless platform would allow me to focus on content creation rather than technical barriers. This could significantly expand my reach and establish thought leadership in my practice area.',
+    '127.0.0.1'
+),
+(
+    'jane@example.com', 'Jane Smith', 'C', 'A', 'B', 'B',
+    'Building a personal brand while maintaining client confidentiality is challenging. Need to balance professional growth with ethical obligations.',
+    'Professional legacy means contributing to the evolution of legal practice and making complex legal concepts understandable for future generations.',
+    'Such a platform would revolutionize how legal professionals share expertise, potentially creating new revenue streams while serving the greater good.',
+    '127.0.0.2'
+);
 
 -- =====================================================
 -- VIEWS
@@ -157,11 +357,15 @@ SELECT
     u.email,
     u.total_points,
     u.shares_count,
+    u.default_rank,
+    u.current_rank,
     u.is_admin,
     COUNT(se.id) as total_share_events,
-    MAX(se.created_at) as last_share_date
+    MAX(se.created_at) as last_share_date,
+    COUNT(f.id) as feedback_responses
 FROM users u
 LEFT JOIN share_events se ON u.id = se.user_id
+LEFT JOIN feedback f ON u.id = f.user_id
 GROUP BY u.id;
 
 DROP VIEW IF EXISTS view_platform_stats;
@@ -175,6 +379,82 @@ SELECT
 FROM share_events se
 GROUP BY se.platform;
 
+DROP VIEW IF EXISTS view_feedback_analytics;
+CREATE VIEW view_feedback_analytics AS
+SELECT
+    COUNT(*) as total_responses,
+
+    -- Biggest hurdle breakdown
+    SUM(CASE WHEN biggest_hurdle = 'A' THEN 1 ELSE 0 END) as hurdle_time_commitment,
+    SUM(CASE WHEN biggest_hurdle = 'B' THEN 1 ELSE 0 END) as hurdle_simplifying,
+    SUM(CASE WHEN biggest_hurdle = 'C' THEN 1 ELSE 0 END) as hurdle_audience_reach,
+    SUM(CASE WHEN biggest_hurdle = 'D' THEN 1 ELSE 0 END) as hurdle_ethics,
+    SUM(CASE WHEN biggest_hurdle = 'E' THEN 1 ELSE 0 END) as hurdle_other,
+
+    -- Primary motivation breakdown
+    SUM(CASE WHEN primary_motivation = 'A' THEN 1 ELSE 0 END) as motivation_brand,
+    SUM(CASE WHEN primary_motivation = 'B' THEN 1 ELSE 0 END) as motivation_clients,
+    SUM(CASE WHEN primary_motivation = 'C' THEN 1 ELSE 0 END) as motivation_revenue,
+    SUM(CASE WHEN primary_motivation = 'D' THEN 1 ELSE 0 END) as motivation_education,
+
+    -- Time consuming part breakdown
+    SUM(CASE WHEN time_consuming_part = 'A' THEN 1 ELSE 0 END) as time_research,
+    SUM(CASE WHEN time_consuming_part = 'B' THEN 1 ELSE 0 END) as time_drafting,
+    SUM(CASE WHEN time_consuming_part = 'C' THEN 1 ELSE 0 END) as time_editing,
+    SUM(CASE WHEN time_consuming_part = 'D' THEN 1 ELSE 0 END) as time_formatting,
+
+    -- Professional fear breakdown
+    SUM(CASE WHEN professional_fear = 'A' THEN 1 ELSE 0 END) as fear_losing_clients,
+    SUM(CASE WHEN professional_fear = 'B' THEN 1 ELSE 0 END) as fear_irrelevant,
+    SUM(CASE WHEN professional_fear = 'C' THEN 1 ELSE 0 END) as fear_outdated,
+    SUM(CASE WHEN professional_fear = 'D' THEN 1 ELSE 0 END) as fear_none,
+
+    -- Recent activity
+    SUM(CASE WHEN submitted_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) as responses_last_7_days,
+    SUM(CASE WHEN submitted_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) as responses_last_30_days,
+
+    -- Date range
+    MIN(submitted_at) as first_response,
+    MAX(submitted_at) as latest_response
+
+FROM feedback;
+
+DROP VIEW IF EXISTS view_feedback_with_user;
+CREATE VIEW view_feedback_with_user AS
+SELECT
+    f.*,
+    u.name as user_name,
+    u.email as user_email,
+    u.is_admin as user_is_admin,
+    u.created_at as user_created_at
+FROM feedback f
+LEFT JOIN users u ON f.user_id = u.id;
+
+-- =====================================================
+-- FINAL SETUP AND VERIFICATION
+-- =====================================================
+
+-- Update all user ranks after initial data load
+CALL sp_UpdateUserRanks();
+
+-- Verify table creation and data
+SELECT 'Database setup completed successfully!' as status;
+SELECT COUNT(*) as total_users FROM users;
+SELECT COUNT(*) as total_share_events FROM share_events;
+SELECT COUNT(*) as total_feedback FROM feedback;
+
+-- Display sample analytics
+SELECT 'User Statistics:' as section;
+SELECT * FROM view_user_stats LIMIT 5;
+
+SELECT 'Platform Statistics:' as section;
+SELECT * FROM view_platform_stats;
+
+SELECT 'Feedback Analytics:' as section;
+SELECT * FROM view_feedback_analytics;
+
 -- =====================================================
 -- SCRIPT EXECUTION COMPLETE
+-- LawVriksh Referral Platform Database v2.0
+-- Features: User Management, Ranking System, Feedback System
 -- =====================================================
