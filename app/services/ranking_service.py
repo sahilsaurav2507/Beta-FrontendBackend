@@ -85,17 +85,17 @@ def calculate_dynamic_rank(db: Session, user_id: int) -> int:
         
         # Calculate rank based on points and registration order
         result = db.execute(text("""
-            SELECT rank FROM (
-                SELECT 
+            SELECT rank_val FROM (
+                SELECT
                     id,
                     ROW_NUMBER() OVER (
-                        ORDER BY 
+                        ORDER BY
                             total_points DESC,
                             created_at ASC
-                    ) as rank
-                FROM users 
+                    ) as rank_val
+                FROM users
                 WHERE is_admin = FALSE
-            ) ranked 
+            ) as ranked
             WHERE id = :user_id
         """), {"user_id": user_id}).first()
         
@@ -201,10 +201,13 @@ def get_user_rank_info(db: Session, user_id: int) -> dict:
             percentile = ((total_users - user.current_rank + 1) / total_users) * 100
         
         # Get next rank info (user with better rank)
-        next_rank_user = db.query(User).filter(
-            User.is_admin == False,
-            User.current_rank == (user.current_rank - 1) if user.current_rank and user.current_rank > 1 else 0
-        ).first()
+        next_rank_target = (user.current_rank - 1) if user.current_rank and user.current_rank > 1 else None
+        next_rank_user = None
+        if next_rank_target:
+            next_rank_user = db.query(User).filter(
+                User.is_admin == False,
+                User.current_rank == next_rank_target
+            ).first()
         
         points_to_next_rank = 0
         if next_rank_user and user.current_rank and user.current_rank > 1:

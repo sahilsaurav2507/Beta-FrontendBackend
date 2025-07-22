@@ -2,7 +2,7 @@ import os
 import logging
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import auth, users, shares, leaderboard, admin, campaigns
+from app.api import auth, users, shares, leaderboard, admin, campaigns, feedback
 from app.utils.monitoring import prometheus_middleware, prometheus_endpoint
 from app.core.error_handlers import setup_error_handlers, RateLimitError
 from app.core.config import settings
@@ -89,7 +89,13 @@ async def rate_limit_middleware(request: Request, call_next):
 # CORS setup (customize origins as needed)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        settings.FRONTEND_URL,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",  # Add support for port 3001
+        "http://127.0.0.1:3001"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -105,6 +111,7 @@ app.include_router(shares.router)
 app.include_router(leaderboard.router)
 app.include_router(admin.router)
 app.include_router(campaigns.router)
+app.include_router(feedback.router)
 
 @app.get("/health")
 def health_check():

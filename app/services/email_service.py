@@ -7,8 +7,24 @@ from typing import List
 def send_welcome_email(user_email: str, user_name: str):
     """Send welcome email to new user."""
     try:
-        subject = "Welcome to Lawvriksh!"
-        body = f"Hello {user_name},\n\nThank you for joining Lawvriksh. Start sharing and climb the leaderboard!"
+        subject = "✨ Welcome to LawVriksh - Help Us Build Something Amazing!"
+        body = f"""Hello {user_name},
+
+Thank you for joining LawVriksh! We're thrilled to have you as part of our founding member community.
+
+Your feedback is crucial in helping us build a platform that truly serves the needs of legal professionals. Please take 5 minutes to share your insights and help shape the future of LawVriksh:
+
+👉 Feedback Survey: https://lawvriksh.com/feedback
+
+Start sharing and climb the leaderboard!
+
+Best regards,
+The LawVriksh Team
+
+---
+🌐 Visit us: https://www.lawvriksh.com
+💬 Share feedback: https://lawvriksh.com/feedback"""
+
         msg = MIMEText(body)
         msg["Subject"] = subject
         msg["From"] = settings.EMAIL_FROM

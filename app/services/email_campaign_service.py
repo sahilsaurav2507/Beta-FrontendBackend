@@ -37,6 +37,14 @@ Welcome aboard! We're absolutely thrilled to have you join our growing community
 
 We're incredibly committed to providing you with invaluable resources and unparalleled opportunities to grow, learn, and connect. Your insights as a founding member will be crucial in shaping LawVriksh into the ultimate platform for the legal community.
 
+**🎯 Help Us Build Something Amazing for You!**
+
+As a valued founding member, your feedback is absolutely essential in creating a platform that truly serves your needs. We've prepared a brief survey that will help us understand your challenges, goals, and vision for the future of legal knowledge sharing.
+
+**👉 Please take 5 minutes to share your insights:** https://lawvriksh.com/feedback
+
+Your responses will directly influence how we develop features, prioritize improvements, and ensure LawVriksh becomes the game-changing platform you deserve. Every piece of feedback matters, and we're genuinely excited to hear your perspective!
+
 Get ready for an exciting journey! We'll be in touch very soon with more updates and access details.
 
 Warmly,
@@ -45,6 +53,7 @@ The LawVriksh Team
 ---
 🌐 Visit us: https://www.lawvriksh.com
 📧 Contact: info@lawvriksh.com
+💬 Share your feedback: https://lawvriksh.com/feedback
         """,
         "schedule": "instant"  # Send immediately on signup
     },
