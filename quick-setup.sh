@@ -84,18 +84,31 @@ generate_env_file() {
 # Build and start services
 start_services() {
     log "Starting all services..."
-    
+
     cd ${PROJECT_DIR}/backend
-    
+
     # Load environment variables
     set -a
     source ${PROJECT_DIR}/.env.production
     set +a
-    
+
+    # Check if Docker Compose file exists
+    if [ ! -f "docker-compose.custom-ports.yml" ]; then
+        error "Docker Compose file not found. Please run the main deployment script first."
+    fi
+
     # Build and start services
-    docker-compose -f docker-compose.custom-ports.yml build
-    docker-compose -f docker-compose.custom-ports.yml up -d
-    
+    info "Building Docker images..."
+    if docker compose -f docker-compose.custom-ports.yml build; then
+        info "Starting services..."
+        docker compose -f docker-compose.custom-ports.yml up -d
+    elif docker-compose -f docker-compose.custom-ports.yml build; then
+        info "Starting services..."
+        docker-compose -f docker-compose.custom-ports.yml up -d
+    else
+        error "Failed to build and start services"
+    fi
+
     success "Services started"
 }
 

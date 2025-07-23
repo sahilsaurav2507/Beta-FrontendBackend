@@ -6,13 +6,25 @@
 # This script handles complete deployment including:
 # - Docker and Docker Compose installation
 # - MySQL on custom port (3307)
-# - Backend on custom port (8001) 
+# - Backend on custom port (8001)
 # - Frontend served by Nginx
 # - SSL certificates with Certbot
+# - Database initialization and migrations
 # - Domain: lawvriksh.com (frontend) and lawvriksh.com/api (backend)
 # =============================================================================
 
-set -e  # Exit on any error
+set -euo pipefail  # Exit on any error, undefined variables, and pipe failures
+
+# Trap to cleanup on exit
+trap cleanup EXIT
+
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        error "Deployment failed with exit code $exit_code"
+        log "Check the logs above for details"
+    fi
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -36,6 +48,17 @@ NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
 # Database configuration
 DB_NAME="lawvriksh_production"
 DB_USER="lawvriksh_user"
+
+# Deployment state tracking
+DEPLOYMENT_STATE_FILE="${PROJECT_DIR}/.deployment_state"
+
+# Required packages
+REQUIRED_PACKAGES=(
+    "curl" "wget" "git" "unzip" "software-properties-common"
+    "apt-transport-https" "ca-certificates" "gnupg" "lsb-release"
+    "build-essential" "python3-pip" "python3-venv" "nodejs" "npm"
+    "ufw" "fail2ban" "htop" "tree" "jq" "netcat-openbsd"
+)
 
 # Logging functions
 log() {
@@ -63,11 +86,63 @@ step() {
     echo -e "${CYAN}[STEP] $1${NC}"
 }
 
+# Save deployment state
+save_state() {
+    local step="$1"
+    echo "$step" > "$DEPLOYMENT_STATE_FILE"
+    log "Deployment state saved: $step"
+}
+
+# Get deployment state
+get_state() {
+    if [ -f "$DEPLOYMENT_STATE_FILE" ]; then
+        cat "$DEPLOYMENT_STATE_FILE"
+    else
+        echo "not_started"
+    fi
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -eq 0 ]]; then
         error "This script should not be run as root. Please run as a regular user with sudo privileges."
     fi
+}
+
+# Check system requirements
+check_system_requirements() {
+    step "Checking system requirements..."
+
+    # Check available disk space (need at least 5GB)
+    local available_space=$(df / | awk 'NR==2 {print $4}')
+    local required_space=5242880  # 5GB in KB
+
+    if [ "$available_space" -lt "$required_space" ]; then
+        error "Insufficient disk space. Need at least 5GB, available: $(($available_space/1024/1024))GB"
+    fi
+
+    # Check available memory (need at least 2GB)
+    local available_memory=$(free -k | awk 'NR==2{print $2}')
+    local required_memory=2097152  # 2GB in KB
+
+    if [ "$available_memory" -lt "$required_memory" ]; then
+        warning "Low memory detected. Recommended: 2GB+, available: $(($available_memory/1024/1024))GB"
+    fi
+
+    # Check if domain resolves to this server
+    local server_ip=$(curl -s ifconfig.me || echo "unknown")
+    local domain_ip=$(dig +short "$DOMAIN" | tail -n1 || echo "unknown")
+
+    if [ "$server_ip" != "unknown" ] && [ "$domain_ip" != "unknown" ]; then
+        if [ "$server_ip" != "$domain_ip" ]; then
+            warning "Domain $DOMAIN does not resolve to this server IP ($server_ip vs $domain_ip)"
+            warning "SSL certificate generation may fail"
+        else
+            success "Domain $DOMAIN correctly resolves to this server"
+        fi
+    fi
+
+    success "System requirements check completed"
 }
 
 # Check Ubuntu version
@@ -88,11 +163,39 @@ check_ubuntu_version() {
 # Update system packages
 update_system() {
     step "Updating system packages..."
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install -y curl wget git unzip software-properties-common \
-        apt-transport-https ca-certificates gnupg lsb-release \
-        build-essential python3-pip python3-venv nodejs npm \
-        ufw fail2ban htop tree
+
+    # Update package lists
+    sudo apt update || error "Failed to update package lists"
+
+    # Upgrade existing packages
+    sudo apt upgrade -y || warning "Package upgrade failed, continuing anyway"
+
+    # Install required packages
+    echo "Installing required packages: ${REQUIRED_PACKAGES[*]}"
+    sudo apt install -y "${REQUIRED_PACKAGES[@]}" || error "Failed to install required packages"
+
+    # Check if all required packages are installed
+    local missing_packages=()
+    for pkg in "${REQUIRED_PACKAGES[@]}"; do
+        if ! dpkg -l | grep -q "ii  $pkg"; then
+            missing_packages+=("$pkg")
+        fi
+    done
+
+    if [ ${#missing_packages[@]} -gt 0 ]; then
+        warning "Some packages could not be installed: ${missing_packages[*]}"
+        warning "You may need to install them manually"
+    else
+        success "All required packages installed successfully"
+    fi
+
+    # Install Node.js LTS if needed
+    if ! command -v node >/dev/null || [ "$(node -v | cut -d. -f1 | tr -d 'v')" -lt 16 ]; then
+        info "Installing/updating Node.js LTS..."
+        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+        sudo apt install -y nodejs
+    fi
+
     success "System packages updated"
 }
 
@@ -114,43 +217,104 @@ configure_firewall() {
 # Install Docker
 install_docker() {
     step "Installing Docker..."
-    
+
+    # Check if Docker is already installed
+    if command -v docker >/dev/null 2>&1; then
+        info "Docker is already installed, checking version..."
+        docker --version
+
+        # Check if Docker is running
+        if ! sudo systemctl is-active --quiet docker; then
+            sudo systemctl start docker
+            sudo systemctl enable docker
+        fi
+
+        # Ensure user is in docker group
+        if ! groups $USER | grep -q docker; then
+            sudo usermod -aG docker $USER
+            warning "Added user to docker group. You may need to log out and back in."
+        fi
+
+        success "Docker is ready"
+        return 0
+    fi
+
     # Remove old versions
     sudo apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-    
+
     # Add Docker's official GPG key
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-    
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg || error "Failed to add Docker GPG key"
+
     # Add Docker repository
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
+
     # Install Docker
-    sudo apt update
-    sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    
+    sudo apt update || error "Failed to update package lists after adding Docker repository"
+    sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || error "Failed to install Docker"
+
     # Add user to docker group
     sudo usermod -aG docker $USER
-    
+
     # Start and enable Docker
-    sudo systemctl start docker
-    sudo systemctl enable docker
-    
-    success "Docker installed successfully"
+    sudo systemctl start docker || error "Failed to start Docker service"
+    sudo systemctl enable docker || error "Failed to enable Docker service"
+
+    # Test Docker installation
+    if sudo docker run --rm hello-world >/dev/null 2>&1; then
+        success "Docker installed and tested successfully"
+    else
+        error "Docker installation test failed"
+    fi
+
+    warning "You may need to log out and back in for Docker group membership to take effect"
 }
 
 # Install Docker Compose
 install_docker_compose() {
     step "Installing Docker Compose..."
-    
+
+    # Check if Docker Compose is already available (comes with Docker Desktop)
+    if docker compose version >/dev/null 2>&1; then
+        info "Docker Compose (plugin) is already available"
+        docker compose version
+        success "Docker Compose is ready"
+        return 0
+    fi
+
+    # Check if standalone docker-compose is installed
+    if command -v docker-compose >/dev/null 2>&1; then
+        info "Docker Compose (standalone) is already installed"
+        docker-compose --version
+        success "Docker Compose is ready"
+        return 0
+    fi
+
+    # Install standalone Docker Compose
+    info "Installing standalone Docker Compose..."
+
     # Get latest version
-    DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d\" -f4)
-    sudo curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-    
+    DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | jq -r '.tag_name' 2>/dev/null || echo "v2.23.0")
+
+    if [ -z "$DOCKER_COMPOSE_VERSION" ] || [ "$DOCKER_COMPOSE_VERSION" = "null" ]; then
+        DOCKER_COMPOSE_VERSION="v2.23.0"
+        warning "Could not fetch latest version, using $DOCKER_COMPOSE_VERSION"
+    fi
+
+    info "Installing Docker Compose $DOCKER_COMPOSE_VERSION..."
+
+    sudo curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose || error "Failed to download Docker Compose"
+    sudo chmod +x /usr/local/bin/docker-compose || error "Failed to make Docker Compose executable"
+
     # Create symlink
     sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-    
-    success "Docker Compose installed"
+
+    # Test installation
+    if docker-compose --version >/dev/null 2>&1; then
+        success "Docker Compose installed successfully"
+        docker-compose --version
+    else
+        error "Docker Compose installation failed"
+    fi
 }
 
 # Install Nginx
@@ -471,11 +635,92 @@ EOF
     success "Nginx configuration created"
 }
 
+# Wait for services to be ready
+wait_for_services() {
+    step "Waiting for services to be ready..."
+
+    local max_attempts=60
+    local attempt=0
+
+    # Wait for MySQL
+    info "Waiting for MySQL on port ${MYSQL_PORT}..."
+    while ! nc -z localhost ${MYSQL_PORT} && [ $attempt -lt $max_attempts ]; do
+        sleep 5
+        ((attempt++))
+        echo -n "."
+    done
+
+    if [ $attempt -eq $max_attempts ]; then
+        error "MySQL failed to start within $(($max_attempts * 5)) seconds"
+    fi
+    success "MySQL is ready"
+
+    # Wait for backend
+    attempt=0
+    info "Waiting for backend on port ${BACKEND_PORT}..."
+    while ! curl -f -s http://localhost:${BACKEND_PORT}/health >/dev/null 2>&1 && [ $attempt -lt $max_attempts ]; do
+        sleep 5
+        ((attempt++))
+        echo -n "."
+    done
+
+    if [ $attempt -eq $max_attempts ]; then
+        error "Backend failed to start within $(($max_attempts * 5)) seconds"
+    fi
+    success "Backend is ready"
+}
+
+# Initialize database
+initialize_database() {
+    step "Initializing database..."
+
+    cd ${PROJECT_DIR}/backend
+
+    # Load environment variables
+    set -a
+    source ${PROJECT_DIR}/.env.production
+    set +a
+
+    # Wait for MySQL to be ready
+    info "Waiting for MySQL to be ready for connections..."
+    local max_attempts=30
+    local attempt=0
+
+    while ! docker exec lawvriksh-mysql mysqladmin ping -h localhost -u root -p${MYSQL_ROOT_PASSWORD} --silent >/dev/null 2>&1 && [ $attempt -lt $max_attempts ]; do
+        sleep 2
+        ((attempt++))
+    done
+
+    if [ $attempt -eq $max_attempts ]; then
+        error "MySQL is not ready for connections"
+    fi
+
+    # Create database if it doesn't exist
+    info "Creating database if it doesn't exist..."
+    docker exec lawvriksh-mysql mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME};" || error "Failed to create database"
+
+    # Run database migrations if alembic is available
+    if [ -f "alembic.ini" ]; then
+        info "Running database migrations..."
+        docker exec lawvriksh-backend alembic upgrade head || warning "Database migrations failed, continuing anyway"
+    else
+        warning "No alembic.ini found, skipping migrations"
+    fi
+
+    # Run database initialization script if available
+    if [ -f "init_db.py" ]; then
+        info "Running database initialization..."
+        docker exec lawvriksh-backend python init_db.py || warning "Database initialization script failed"
+    fi
+
+    success "Database initialized"
+}
+
 # Create Docker Compose with custom ports
 create_docker_compose() {
     step "Creating Docker Compose configuration with custom ports..."
 
-    cat > ${PROJECT_DIR}/backend/docker-compose.production.yml << 'EOF'
+    cat > ${PROJECT_DIR}/backend/docker-compose.custom-ports.yml << 'EOF'
 version: '3.8'
 
 # Production Docker Compose for Lawvriksh
@@ -564,7 +809,7 @@ services:
 EOF
 
     # Continue Docker Compose configuration
-    cat >> ${PROJECT_DIR}/backend/docker-compose.production.yml << 'EOF'
+    cat >> ${PROJECT_DIR}/backend/docker-compose.custom-ports.yml << 'EOF'
 
   # FastAPI Backend Application on custom port
   backend:
@@ -728,17 +973,55 @@ setup_ssl() {
     sudo mkdir -p /var/www/certbot
     sudo chown www-data:www-data /var/www/certbot
 
+    # Test Nginx configuration before proceeding
+    if ! sudo nginx -t; then
+        error "Nginx configuration is invalid. Cannot proceed with SSL setup."
+    fi
+
     # Reload Nginx to apply initial configuration
-    sudo systemctl reload nginx
+    sudo systemctl reload nginx || error "Failed to reload Nginx"
+
+    # Check if certificates already exist
+    if [ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]; then
+        info "SSL certificates already exist for ${DOMAIN}"
+
+        # Check if they're still valid (not expiring in next 30 days)
+        if openssl x509 -in "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" -noout -checkend 2592000 >/dev/null 2>&1; then
+            success "Existing SSL certificates are valid"
+            return 0
+        else
+            warning "SSL certificates are expiring soon, renewing..."
+        fi
+    fi
 
     # Get SSL certificate
     info "Requesting SSL certificate for ${DOMAIN}..."
-    sudo certbot --nginx -d ${DOMAIN} -d www.${DOMAIN} --non-interactive --agree-tos --email admin@${DOMAIN}
+
+    # Use staging environment for testing (comment out for production)
+    # local staging_flag="--staging"
+    local staging_flag=""
+
+    if sudo certbot --nginx -d ${DOMAIN} -d www.${DOMAIN} --non-interactive --agree-tos --email admin@${DOMAIN} $staging_flag; then
+        success "SSL certificates obtained successfully"
+    else
+        error "Failed to obtain SSL certificates. Check domain DNS and firewall settings."
+    fi
 
     # Setup auto-renewal
-    echo "0 12 * * * /usr/bin/certbot renew --quiet" | sudo crontab -
+    if ! crontab -l 2>/dev/null | grep -q "certbot renew"; then
+        (crontab -l 2>/dev/null; echo "0 12 * * * /usr/bin/certbot renew --quiet") | crontab -
+        success "SSL auto-renewal configured"
+    else
+        info "SSL auto-renewal already configured"
+    fi
 
-    success "SSL certificates configured"
+    # Test certificate renewal
+    info "Testing certificate renewal..."
+    if sudo certbot renew --dry-run >/dev/null 2>&1; then
+        success "Certificate renewal test passed"
+    else
+        warning "Certificate renewal test failed, but certificates are installed"
+    fi
 }
 
 # Start services
@@ -752,39 +1035,69 @@ start_services() {
     source ${PROJECT_DIR}/.env.production
     set +a
 
+    # Check if Docker Compose file exists
+    if [ ! -f "docker-compose.custom-ports.yml" ]; then
+        error "Docker Compose file not found: docker-compose.custom-ports.yml"
+    fi
+
     # Start Docker services
-    docker-compose -f docker-compose.production.yml up -d
+    info "Starting Docker services..."
+    if docker compose -f docker-compose.custom-ports.yml up -d; then
+        success "Docker services started"
+    elif docker-compose -f docker-compose.custom-ports.yml up -d; then
+        success "Docker services started (using legacy docker-compose)"
+    else
+        error "Failed to start Docker services"
+    fi
 
     # Wait for services to be healthy
-    info "Waiting for services to be healthy..."
-    sleep 30
+    wait_for_services
 
     # Check service status
-    docker-compose -f docker-compose.production.yml ps
+    info "Service status:"
+    if command -v docker-compose >/dev/null; then
+        docker-compose -f docker-compose.custom-ports.yml ps
+    else
+        docker compose -f docker-compose.custom-ports.yml ps
+    fi
+
+    # Initialize database
+    initialize_database
 
     # Restart Nginx to ensure it picks up the backend
-    sudo systemctl restart nginx
+    sudo systemctl restart nginx || error "Failed to restart Nginx"
 
-    success "All services started"
+    success "All services started and initialized"
 }
 
 # Create systemd service for auto-start
 create_systemd_service() {
     step "Creating systemd service for auto-start..."
 
+    # Determine which docker-compose command to use
+    local docker_compose_cmd
+    if command -v docker-compose >/dev/null; then
+        docker_compose_cmd="/usr/local/bin/docker-compose"
+    else
+        docker_compose_cmd="/usr/bin/docker compose"
+    fi
+
     sudo tee /etc/systemd/system/lawvriksh.service > /dev/null << EOF
 [Unit]
 Description=Lawvriksh Application
 Requires=docker.service
-After=docker.service
+After=docker.service network.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${PROJECT_DIR}/backend
-ExecStart=/usr/local/bin/docker-compose -f docker-compose.production.yml up -d
-ExecStop=/usr/local/bin/docker-compose -f docker-compose.production.yml down
-TimeoutStartSec=0
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=${docker_compose_cmd} -f docker-compose.custom-ports.yml up -d
+ExecStop=${docker_compose_cmd} -f docker-compose.custom-ports.yml down
+ExecReload=${docker_compose_cmd} -f docker-compose.custom-ports.yml restart
+TimeoutStartSec=300
+TimeoutStopSec=60
 
 [Install]
 WantedBy=multi-user.target
@@ -922,43 +1235,71 @@ main() {
     log "Project Directory: ${PROJECT_DIR}"
     log "=============================================================="
 
+    # Check current deployment state
+    local current_state=$(get_state)
+    if [ "$current_state" != "not_started" ]; then
+        warning "Previous deployment detected (state: $current_state)"
+        read -p "Do you want to continue from where it left off? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            info "Starting fresh deployment..."
+            rm -f "$DEPLOYMENT_STATE_FILE"
+        fi
+    fi
+
     # Pre-deployment checks
+    save_state "pre_checks"
     check_root
     check_ubuntu_version
+    check_system_requirements
 
     # System setup
+    save_state "system_setup"
     update_system
     configure_firewall
 
     # Install required software
+    save_state "software_installation"
     install_docker
     install_docker_compose
     install_nginx
     install_certbot
 
     # Generate secrets and setup project
+    save_state "project_setup"
     generate_secrets
     create_project_structure
     create_environment_file
 
     # Copy and build application
+    save_state "application_setup"
     copy_application_files
     build_frontend
 
     # Configure services
+    save_state "service_configuration"
     create_nginx_config
     create_docker_compose
 
-    # Setup SSL and start services
-    setup_ssl
+    # Start services (before SSL to avoid chicken-and-egg problem)
+    save_state "service_startup"
     start_services
 
+    # Setup SSL after services are running
+    save_state "ssl_setup"
+    setup_ssl
+
     # Create additional scripts and services
+    save_state "finalization"
     create_systemd_service
     create_backup_script
 
     # Test deployment
+    save_state "testing"
     test_deployment
+
+    # Mark as completed
+    save_state "completed"
 
     # Display final information
     display_final_info

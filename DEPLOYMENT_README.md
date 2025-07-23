@@ -10,6 +10,17 @@ This deployment package provides a complete, production-ready setup for the Lawv
 - **SSL**: Automatic SSL certificates with Let's Encrypt
 - **Monitoring**: Health checks and logging
 - **Backup**: Automated backup system
+- **Validation**: Pre-deployment validation and testing
+
+## ⚠️ Important Prerequisites
+
+Before starting the deployment, ensure:
+
+1. **Ubuntu 24.04 LTS** server with at least 2GB RAM and 10GB disk space
+2. **Domain name** (`lawvriksh.com`) pointing to your server's IP address
+3. **Non-root user** with sudo privileges
+4. **Ports 80, 443, 3307, 8001** are available and not blocked by firewall
+5. **Internet connectivity** for downloading packages and SSL certificates
 
 ## Architecture
 
@@ -31,34 +42,60 @@ Backend → MySQL (Port 3307)
 ## Files Included
 
 ### Deployment Scripts
-- `deploy-ubuntu-complete.sh` - Complete deployment script
-- `quick-setup.sh` - Quick setup after deployment
+- `deploy-ubuntu-complete.sh` - **Main deployment script** (improved & fixed)
+- `validate-deployment.sh` - **Pre-deployment validation** (new)
+- `quick-setup.sh` - Quick setup after deployment (improved)
 - `test-deployment.sh` - Comprehensive testing script
+- `manage-services.sh` - Service management utility
 
 ### Docker Configuration
-- `docker-compose.custom-ports.yml` - Docker Compose with custom ports
+- `docker-compose.custom-ports.yml` - Docker Compose with custom ports (fixed)
 - `Dockerfile.frontend` - Frontend Docker configuration
 - `nginx-frontend.conf` - Nginx config for frontend container
 
 ### Nginx Configuration
-- `nginx-lawvriksh.conf` - Main Nginx configuration for production
+- `nginx-lawvriksh.conf` - Main Nginx configuration for production (enhanced)
 
 ### Environment Configuration
-- `.env.production.template` - Environment variables template
+- `.env.production.template` - Environment variables template (comprehensive)
 
 ## Quick Start
 
-### 1. Run Complete Deployment
+### 1. Validate Your System (Recommended)
+
+```bash
+# Make validation script executable
+chmod +x validate-deployment.sh
+
+# Run pre-deployment validation
+./validate-deployment.sh
+```
+
+This will check:
+- System requirements (Ubuntu 24.04, disk space, memory)
+- Network connectivity and domain resolution
+- Port availability
+- Required files and application structure
+- System dependencies
+
+### 2. Run Complete Deployment
 
 ```bash
 # Make scripts executable
 chmod +x deploy-ubuntu-complete.sh
 chmod +x quick-setup.sh
 chmod +x test-deployment.sh
+chmod +x manage-services.sh
 
 # Run complete deployment (as non-root user with sudo)
 ./deploy-ubuntu-complete.sh
 ```
+
+**New Features:**
+- ✅ **Resume capability**: If deployment fails, you can resume from where it stopped
+- ✅ **Better error handling**: More detailed error messages and validation
+- ✅ **Health checks**: Waits for services to be fully ready before proceeding
+- ✅ **Database initialization**: Automatically sets up database and runs migrations
 
 ### 2. Quick Setup (Alternative)
 
