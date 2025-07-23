@@ -449,18 +449,41 @@ EOF
 copy_application_files() {
     step "Copying application files to ${PROJECT_DIR}..."
 
-    # Create backend directory
+    # Create directories
     mkdir -p ${PROJECT_DIR}/backend
+    mkdir -p ${PROJECT_DIR}/frontend
 
     # Copy backend files (exclude Frontend directory)
+    info "Copying backend files..."
     rsync -av --exclude='Frontend' --exclude='.git' --exclude='__pycache__' \
           --exclude='*.pyc' --exclude='.env*' --exclude='node_modules' \
-          . ${PROJECT_DIR}/backend/
+          --exclude='dist' --exclude='build' \
+          . ${PROJECT_DIR}/backend/ || error "Failed to copy backend files"
 
     # Copy frontend files
     if [ -d "Frontend" ]; then
-        cp -r Frontend ${PROJECT_DIR}/frontend/
+        info "Copying frontend files..."
+        cp -r Frontend/* ${PROJECT_DIR}/frontend/ || error "Failed to copy frontend files"
+
+        # Verify package.json exists
+        if [ -f "${PROJECT_DIR}/frontend/package.json" ]; then
+            success "Frontend package.json found"
+        else
+            error "Frontend package.json not found after copying"
+        fi
+    else
+        warning "Frontend directory not found in current location"
+        # Try to find Frontend directory
+        if [ -d "../Frontend" ]; then
+            info "Found Frontend directory in parent directory, copying..."
+            cp -r ../Frontend/* ${PROJECT_DIR}/frontend/
+        else
+            error "Frontend directory not found"
+        fi
     fi
+
+    # Set proper permissions
+    chown -R $USER:$USER ${PROJECT_DIR}/backend ${PROJECT_DIR}/frontend
 
     success "Application files copied"
 }
@@ -472,21 +495,55 @@ build_frontend() {
     if [ -d "${PROJECT_DIR}/frontend" ]; then
         cd ${PROJECT_DIR}/frontend
 
-        # Install dependencies
-        npm install
+        # Check if package.json exists
+        if [ ! -f "package.json" ]; then
+            error "package.json not found in frontend directory"
+        fi
 
-        # Build for production
-        npm run build
+        # Check if dist directory already exists (pre-built)
+        if [ -d "dist" ] && [ -f "dist/index.html" ]; then
+            info "Frontend appears to be pre-built, using existing dist directory"
+        else
+            # Check Node.js version
+            if ! command -v node >/dev/null; then
+                error "Node.js is not installed"
+            fi
+
+            local node_version=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+            if [ "$node_version" -lt 16 ]; then
+                warning "Node.js version is $node_version, recommended version is 16+"
+            fi
+
+            # Install dependencies
+            info "Installing frontend dependencies..."
+            npm install || error "Failed to install frontend dependencies"
+
+            # Build for production
+            info "Building frontend for production..."
+            npm run build || error "Frontend build failed"
+        fi
+
+        # Verify build output
+        if [ ! -d "dist" ] || [ ! -f "dist/index.html" ]; then
+            error "Frontend build did not produce expected output (dist/index.html)"
+        fi
 
         # Copy built files to nginx directory
+        info "Deploying frontend files to web directory..."
         sudo mkdir -p /var/www/${DOMAIN}
-        sudo cp -r dist/* /var/www/${DOMAIN}/
+        sudo cp -r dist/* /var/www/${DOMAIN}/ || error "Failed to copy frontend files to web directory"
         sudo chown -R www-data:www-data /var/www/${DOMAIN}
 
+        # Verify deployment
+        if [ -f "/var/www/${DOMAIN}/index.html" ]; then
+            success "Frontend built and deployed successfully"
+        else
+            error "Frontend deployment verification failed"
+        fi
+
         cd - > /dev/null
-        success "Frontend built and deployed"
     else
-        warning "Frontend directory not found, skipping frontend build"
+        error "Frontend directory not found at ${PROJECT_DIR}/frontend"
     fi
 }
 

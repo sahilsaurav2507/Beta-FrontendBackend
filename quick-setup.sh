@@ -155,23 +155,58 @@ setup_database() {
 # Build frontend
 build_frontend() {
     log "Building frontend..."
-    
-    if [ -d "${PROJECT_DIR}/frontend" ]; then
-        cd ${PROJECT_DIR}/frontend
-        
-        # Install dependencies and build
-        npm install
-        npm run build
-        
-        # Copy to nginx directory
-        sudo mkdir -p /var/www/${DOMAIN}
-        sudo cp -r dist/* /var/www/${DOMAIN}/
-        sudo chown -R www-data:www-data /var/www/${DOMAIN}
-        
-        success "Frontend built and deployed"
-    else
-        warning "Frontend directory not found"
+
+    # Check if frontend directory exists
+    if [ ! -d "${PROJECT_DIR}/frontend" ]; then
+        warning "Frontend directory not found, attempting to copy from current location..."
+
+        # Try to find and copy Frontend directory
+        if [ -d "Frontend" ]; then
+            mkdir -p ${PROJECT_DIR}/frontend
+            cp -r Frontend/* ${PROJECT_DIR}/frontend/
+            chown -R $USER:$USER ${PROJECT_DIR}/frontend
+            success "Frontend files copied"
+        elif [ -d "../Frontend" ]; then
+            mkdir -p ${PROJECT_DIR}/frontend
+            cp -r ../Frontend/* ${PROJECT_DIR}/frontend/
+            chown -R $USER:$USER ${PROJECT_DIR}/frontend
+            success "Frontend files copied from parent directory"
+        else
+            error "Frontend directory not found anywhere"
+        fi
     fi
+
+    cd ${PROJECT_DIR}/frontend
+
+    # Verify package.json exists
+    if [ ! -f "package.json" ]; then
+        error "package.json not found in frontend directory"
+    fi
+
+    # Check if already built
+    if [ -d "dist" ] && [ -f "dist/index.html" ]; then
+        info "Frontend appears to be pre-built, using existing build"
+    else
+        # Install dependencies and build
+        info "Installing dependencies..."
+        npm install || error "Failed to install dependencies"
+
+        info "Building frontend..."
+        npm run build || error "Frontend build failed"
+    fi
+
+    # Verify build output
+    if [ ! -d "dist" ] || [ ! -f "dist/index.html" ]; then
+        error "Frontend build did not produce expected output"
+    fi
+
+    # Copy to nginx directory
+    sudo mkdir -p /var/www/${DOMAIN}
+    sudo cp -r dist/* /var/www/${DOMAIN}/
+    sudo chown -R www-data:www-data /var/www/${DOMAIN}
+
+    cd - > /dev/null
+    success "Frontend built and deployed"
 }
 
 # Configure and restart nginx
